@@ -3,10 +3,11 @@
 import argparse, socket, time, json, select, struct, sys, math
 
 class Router:
-
+    debug = True
     relations = {}
     sockets = {}
     ports = {}
+    routing = {}
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -38,8 +39,7 @@ class Router:
                     if self.sockets[sock] == conn:
                         srcif = sock
                         break
-                msg = k.decode('utf-8')
-
+                msg = json.loads(k.decode('utf-8'))
                 print("Received message '%s' from %s" % (msg, srcif))
         return
 

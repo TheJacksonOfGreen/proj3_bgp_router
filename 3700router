@@ -1,13 +1,27 @@
 #!/usr/bin/env -S python3 -u
 
+# Jackson Green and Tim Doyle
+# Networks and Distributed Systems
+# TF 9:50 AM Section and TF 3:25 PM Section, respectively
+# Prof. Alden Jackson
+# Project 3: BGP Router
+# Coded in Python
+
 import argparse, socket, time, json, select, struct, sys, math
+
+def ipInRange(ip, network, netmask):
+    mask = sum(map(lambda x: bin(x).count("1"), map(int, netmask.split("."))))
+    rangeip = int("".join(map(lambda x: x.split("b")[1], map(str, map(bin, map(int, network.split("."))))))) // (10 ** mask)
+    targetip = int("".join(map(lambda x: x.split("b")[1], map(str, map(bin, map(int, ip.split("."))))))) // (10 ** mask)
+    return rangeip == targetip
 
 class Router:
     debug = True
     relations = {}
     sockets = {}
     ports = {}
-    routing = {}
+    routes = {}
+    inbox = []
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -19,7 +33,8 @@ class Router:
             self.sockets[neighbor].bind(('localhost', 0))
             self.ports[neighbor] = int(port)
             self.relations[neighbor] = relation
-            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
+            self.routes[neighbor] = []
+            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {} }))
 
     def our_addr(self, dst):
         quads = list(int(qdn) for qdn in dst.split('.'))
@@ -40,6 +55,22 @@ class Router:
                         srcif = sock
                         break
                 msg = json.loads(k.decode('utf-8'))
+                self.inbox.append(msg)
+                if msg["type"] == "update":
+                    self.routes[msg["src"]].append({"network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "localpref": msg["msg"]["localpref"], "selfOrigin": msg["msg"]["selfOrigin"], "ASPath": msg["msg"]["ASPath"], "origin": msg["msg"]["origin"]})
+                    newASPath = [self.asn]
+                    newASPath.extend(msg["msg"]["ASPath"])
+                    for neighbor in self.routes.keys():
+                        if neighbor != msg["src"]:
+                            self.send(neighbor, json.dumps({ "type": "update", "src": self.our_addr(neighbor), "dst": neighbor, "msg": { "network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "ASPath": newASPath } }))
+                elif msg["type"] == "data":
+                    pathOptions = []
+                    for neighbor in self.routes.keys():
+                        for route in self.routes[neighbor]:
+                            if ipInRange(msg["dst"], route["network"], route["netmask"]):
+                                pathOptions.append({"neighbor": neighbor, "route": route})
+                    print(pathOptions)
+                    self.send(pathOptions[0]["neighbor"], json.dumps({ "type": "data", "src": self.our_addr(neighbor), "dst": msg["dst"], "msg": msg["msg"] }))
                 print("Received message '%s' from %s" % (msg, srcif))
         return
 

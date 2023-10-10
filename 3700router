@@ -17,6 +17,24 @@ def ipInRange(ip, network, netmask):
     targetip = targetip // (10 ** mask)
     return rangeip == targetip
 
+def pathSorter(p):
+    a = p["localpref"] * 10
+    a += 1 if p["selfOrigin"] else 0
+    a *= 100
+    a += 99 - (len(p["ASPath"]) if len(p["ASPath"]) < 100 else 99)
+    a *= 10
+    a += (3 if p["origin"] == "IGP" else (2 if p["origin"] == "EGP" else 1))
+    ipSplit = list(map(int, p["network"].split(".")))
+    a *= 1000
+    a += 256 - ipSplit[0]
+    a *= 1000
+    a += 256 - ipSplit[1]
+    a *= 1000
+    a += 256 - ipSplit[2]
+    a *= 1000
+    a += 256 - ipSplit[3]
+    return a
+
 class Router:
     debug = True
     relations = {}
@@ -29,8 +47,8 @@ class Router:
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
-        for relationship in connections:
-            port, neighbor, relation = relationship.split("-")
+        for self.relationship in connections:
+            port, neighbor, relation = self.relationship.split("-")
 
             self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sockets[neighbor].bind(('localhost', 0))
@@ -64,15 +82,33 @@ class Router:
                     newASPath = [self.asn]
                     newASPath.extend(msg["msg"]["ASPath"])
                     for neighbor in self.neighbors:
-                        if neighbor != msg["src"]:
+                        if (self.relations[msg["src"]] == "cust" or self.relations[neighbor] == "cust") and neighbor != msg["src"]:
                             self.send(neighbor, json.dumps({ "type": "update", "src": self.our_addr(neighbor), "dst": neighbor, "msg": { "network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "ASPath": newASPath } }))
                 elif msg["type"] == "data":
                     pathOptions = []
                     for route in self.routing:
                         if ipInRange(msg["dst"], route["network"], route["netmask"]):
                             pathOptions.append(route)
-                    print(pathOptions)
-                    self.send(pathOptions[0]["peer"], json.dumps({ "type": "data", "src": self.our_addr(neighbor), "dst": msg["dst"], "msg": msg["msg"] }))
+                    if (len(pathOptions) < 1):
+                        self.send(msg["src"], json.dumps({ "type": "no route", "src": self.our_addr(neighbor), "dst": msg["src"], "msg": {} }))
+                    else:
+                        if len(pathOptions) > 1:
+                            pathOptions.sort(reverse=True, key=pathSorter)
+                        chosenPath = pathOptions[0]
+                        if (self.relations[chosenPath["peer"]] == "cust" or msg["src"] == "cust") or (self.relations[chosenPath["peer"]] != "cust" and msg["src"] != "cust"):
+                            self.send(chosenPath["peer"], json.dumps({ "type": "data", "src": self.our_addr(neighbor), "dst": msg["dst"], "msg": msg["msg"] }))
+                        else:
+                            self.send(msg["src"], json.dumps({ "type": "no route", "src": self.our_addr(neighbor), "dst": msg["src"], "msg": {} }))
+                elif msg["type"] == "withdraw":
+                    removeUs = []
+                    for route in self.routing:
+                        for netCompare in msg["msg"]:
+                            if route["peer"] == msg["src"] and route["network"] == netCompare["network"] and route["netmask"] == netCompare["netmask"]:
+                                    removeUs.append(route)
+                    self.routing = [x for x in self.routing if x not in removeUs]
+                    for neighbor in self.neighbors:
+                        if (self.relations[msg["src"]] == "cust" or self.relations[neighbor] == "cust") and neighbor != msg["src"]:
+                            self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(neighbor), "dst": neighbor, "msg": msg["msg"] }))
                 elif msg["type"] == "dump":
                     self.send(msg["src"], json.dumps({ "type": "table", "src": self.our_addr(neighbor), "dst": msg["src"], "msg": self.routing }))
                 print("Received message '%s' from %s" % (msg, srcif))

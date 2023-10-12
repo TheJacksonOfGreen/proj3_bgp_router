@@ -144,11 +144,13 @@ class Router:
                         break
                 msg = json.loads(k.decode('utf-8'))
                 self.inbox.append(msg)
+                print("------- NEW MESSAGE RECVD -------")
+                print("Received message '%s' from %s" % (msg, srcif))
                 if msg["type"] == "update":
                     self.routing.append({"peer": msg["src"], "network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "localpref": msg["msg"]["localpref"], "selfOrigin": msg["msg"]["selfOrigin"], "ASPath": msg["msg"]["ASPath"], "origin": msg["msg"]["origin"], "subroutes": []})
+                    self.reaggregate()
                     newASPath = [self.asn]
                     newASPath.extend(msg["msg"]["ASPath"])
-                    self.reaggregate()
                     for neighbor in self.neighbors:
                         if (self.relations[srcif] == "cust" or self.relations[neighbor] == "cust") and neighbor != srcif:
                             self.send(neighbor, json.dumps({ "type": "update", "src": self.our_addr(neighbor), "dst": neighbor, "msg": { "network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "ASPath": newASPath } }))
@@ -160,9 +162,12 @@ class Router:
                 elif msg["type"] == "data":
                     pathOptions = []
                     for route in self.routing:
-                        if ipInRange(msg["dst"], route["network"], route["netmask"]) and (self.relations[route["peer"]] == "cust" or srcif == "cust"):
+                        if ipInRange(msg["dst"], route["network"], route["netmask"]) and (self.relations[route["peer"]] == "cust" or self.relations[srcif] == "cust"):
                             pathOptions.append(route)
-                    if (len(pathOptions) < 1):
+                            print("Optioned Route through peer " + route["peer"] + ", found VIABLE")
+                        else:
+                            print("Optioned Route through peer " + route["peer"] + ", found UNVIABLE")
+                    if len(pathOptions) < 1:
                         self.send(srcif, json.dumps({ "type": "no route", "src": self.our_addr(neighbor), "dst": srcif, "msg": {} }))
                     else:
                         if len(pathOptions) > 1:
@@ -171,7 +176,6 @@ class Router:
                         self.send(chosenPath["peer"], json.dumps({ "type": "data", "src": self.our_addr(neighbor), "dst": msg["dst"], "msg": msg["msg"] }))
                 elif msg["type"] == "dump":
                     self.send(msg["src"], json.dumps({ "type": "table", "src": self.our_addr(neighbor), "dst": msg["src"], "msg": list(map(lambda x: {key: val for key, val in x.items() if key != 'subroutes'}, self.routing)) }))
-                print("Received message '%s' from %s" % (msg, srcif))
         return
 
 if __name__ == "__main__":

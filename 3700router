@@ -10,12 +10,32 @@
 import argparse, socket, time, json, select, struct, sys, math
 
 def ipInRange(ip, network, netmask):
-    mask = sum(map(lambda x: bin(x).count("1"), map(int, netmask.split("."))))
+    mask = 32 - sum(map(lambda x: bin(x).count("1"), map(int, netmask.split("."))))
     rangeip = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, network.split(".")))))))
     targetip = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, ip.split(".")))))))
     rangeip = rangeip // (10 ** mask)
     targetip = targetip // (10 ** mask)
     return rangeip == targetip
+
+def isNumAdj(network1, network2, netmask):
+    mask = 32 - sum(map(lambda x: bin(x).count("1"), map(int, netmask.split("."))))
+    ip1 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, network1.split(".")))))))
+    ip2 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, network2.split(".")))))))
+    ip1 = ip1 // (10 ** mask)
+    ip2 = ip2 // (10 ** mask)
+    return (ip1 != ip2) and (ip1 // 10 == ip2 // 10)
+
+def decrementMask(netmask):
+    mask = sum(map(lambda x: bin(x).count("1"), map(int, netmask.split(".")))) - 1
+    final = ""
+    while mask > 8:
+        mask -= 8
+        final += "255."
+    mask = 256 - (2 ** mask)
+    final += "%d" % (mask)
+    while len(final.split(".")) < 4:
+        final += ".0"
+    return final
 
 def pathSorter(p):
     a = p["localpref"] * 10
@@ -63,7 +83,54 @@ class Router:
         return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
 
     def send(self, network, message):
+        print("Sending message '%s' to %s" % (message, network))
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
+
+    def reaggregate(self):
+        agg = False
+        for i in range(0, len(self.routing)):
+            r1 = self.routing[i]
+            for j in range(i + 1, len(self.routing)):
+                r2 = self.routing[j]
+                if r1["peer"] == r2["peer"] and r1["localpref"] == r2["localpref"] and r1["selfOrigin"] == r2["selfOrigin"] and r1["ASPath"] == r2["ASPath"] and r1["origin"] == r2["origin"] and r1["netmask"] == r2["netmask"] and isNumAdj(r1["network"], r2["network"], r1["netmask"]):
+                    self.routing.remove(r1)
+                    self.routing.remove(r2)
+                    self.routing.append(self.routing.append({"peer": r1["peer"], "network": r1["network"], "netmask": decrementMask(r1["netmask"]), "localpref": r1["localpref"], "selfOrigin": r1["selfOrigin"], "ASPath": r1["ASPath"], "origin": r1["origin"], "subroutes": [r1, r2]}))
+                    agg = True
+                    break
+            if agg:
+                break
+        if agg:
+            self.reaggregate()
+
+    def newRemove(self, msg, srcif):
+        removeUs = []
+        newRoutes = []
+        for route in self.routing:
+            for netCompare in msg["msg"]:
+                if route["peer"] == srcif and route["network"] == netCompare["network"] and route["netmask"] == netCompare["netmask"]:
+                    removeUs.append(route)
+                elif len(route["subroutes"]) > 0:
+                    foo, bar = checkSubroutes(msg, srcif, route)
+                    removeUs.extend(foo)
+                    newRoutes.extend(bar)
+        self.routing = [x for x in self.routing if x not in removeUs]
+        for nr in newRoutes:
+            self.routing.append(nr)
+
+    def checkSubroutes(self, msg, srcif, route):
+        removeUs = []
+        newRoutes = []
+        for subroute in route["subroutes"]:
+            if subroute["peer"] == srcif and subroute["network"] == netCompare["network"] and subroute["netmask"] == netCompare["netmask"]:
+                removeUs.append(subroute)
+                newRoutes.extend([r for r in route["subroutes"] if r != subroute])
+                break
+            elif len(subroute["subroutes"]) > 0:
+                foo, bar = checkSubroutes(msg, srcif, subroute)
+                removeUs.extend(foo)
+                newRoutes.extend(bar)
+        return removeUs, newRoutes
 
     def run(self):
         while True:
@@ -78,39 +145,32 @@ class Router:
                 msg = json.loads(k.decode('utf-8'))
                 self.inbox.append(msg)
                 if msg["type"] == "update":
-                    self.routing.append({"peer": msg["src"], "network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "localpref": msg["msg"]["localpref"], "selfOrigin": msg["msg"]["selfOrigin"], "ASPath": msg["msg"]["ASPath"], "origin": msg["msg"]["origin"]})
+                    self.routing.append({"peer": msg["src"], "network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "localpref": msg["msg"]["localpref"], "selfOrigin": msg["msg"]["selfOrigin"], "ASPath": msg["msg"]["ASPath"], "origin": msg["msg"]["origin"], "subroutes": []})
                     newASPath = [self.asn]
                     newASPath.extend(msg["msg"]["ASPath"])
+                    self.reaggregate()
                     for neighbor in self.neighbors:
-                        if (self.relations[msg["src"]] == "cust" or self.relations[neighbor] == "cust") and neighbor != msg["src"]:
+                        if (self.relations[srcif] == "cust" or self.relations[neighbor] == "cust") and neighbor != srcif:
                             self.send(neighbor, json.dumps({ "type": "update", "src": self.our_addr(neighbor), "dst": neighbor, "msg": { "network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "ASPath": newASPath } }))
+                elif msg["type"] == "withdraw":
+                    self.newRemove(msg, srcif)
+                    for neighbor in self.neighbors:
+                        if (self.relations[srcif] == "cust" or self.relations[neighbor] == "cust") and neighbor != srcif:
+                            self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(neighbor), "dst": neighbor, "msg": msg["msg"] }))
                 elif msg["type"] == "data":
                     pathOptions = []
                     for route in self.routing:
-                        if ipInRange(msg["dst"], route["network"], route["netmask"]):
+                        if ipInRange(msg["dst"], route["network"], route["netmask"]) and (self.relations[route["peer"]] == "cust" or srcif == "cust"):
                             pathOptions.append(route)
                     if (len(pathOptions) < 1):
-                        self.send(msg["src"], json.dumps({ "type": "no route", "src": self.our_addr(neighbor), "dst": msg["src"], "msg": {} }))
+                        self.send(srcif, json.dumps({ "type": "no route", "src": self.our_addr(neighbor), "dst": srcif, "msg": {} }))
                     else:
                         if len(pathOptions) > 1:
                             pathOptions.sort(reverse=True, key=pathSorter)
                         chosenPath = pathOptions[0]
-                        if (self.relations[chosenPath["peer"]] == "cust" or msg["src"] == "cust") or (self.relations[chosenPath["peer"]] != "cust" and msg["src"] != "cust"):
-                            self.send(chosenPath["peer"], json.dumps({ "type": "data", "src": self.our_addr(neighbor), "dst": msg["dst"], "msg": msg["msg"] }))
-                        else:
-                            self.send(msg["src"], json.dumps({ "type": "no route", "src": self.our_addr(neighbor), "dst": msg["src"], "msg": {} }))
-                elif msg["type"] == "withdraw":
-                    removeUs = []
-                    for route in self.routing:
-                        for netCompare in msg["msg"]:
-                            if route["peer"] == msg["src"] and route["network"] == netCompare["network"] and route["netmask"] == netCompare["netmask"]:
-                                    removeUs.append(route)
-                    self.routing = [x for x in self.routing if x not in removeUs]
-                    for neighbor in self.neighbors:
-                        if (self.relations[msg["src"]] == "cust" or self.relations[neighbor] == "cust") and neighbor != msg["src"]:
-                            self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(neighbor), "dst": neighbor, "msg": msg["msg"] }))
+                        self.send(chosenPath["peer"], json.dumps({ "type": "data", "src": self.our_addr(neighbor), "dst": msg["dst"], "msg": msg["msg"] }))
                 elif msg["type"] == "dump":
-                    self.send(msg["src"], json.dumps({ "type": "table", "src": self.our_addr(neighbor), "dst": msg["src"], "msg": self.routing }))
+                    self.send(msg["src"], json.dumps({ "type": "table", "src": self.our_addr(neighbor), "dst": msg["src"], "msg": list(map(lambda x: {key: val for key, val in x.items() if key != 'subroutes'}, self.routing)) }))
                 print("Received message '%s' from %s" % (msg, srcif))
         return
 

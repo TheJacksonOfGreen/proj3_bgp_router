@@ -9,8 +9,11 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 
+def maskLength(str):
+    return sum(map(lambda x: bin(x).count("1"), map(int, str.split("."))))
+
 def ipInRange(ip, network, netmask):
-    mask = 32 - sum(map(lambda x: bin(x).count("1"), map(int, netmask.split("."))))
+    mask = 32 - maskLength(netmask)
     rangeip = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, network.split(".")))))))
     targetip = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, ip.split(".")))))))
     rangeip = rangeip // (10 ** mask)
@@ -18,7 +21,7 @@ def ipInRange(ip, network, netmask):
     return rangeip == targetip
 
 def isNumAdj(network1, network2, netmask):
-    mask = 32 - sum(map(lambda x: bin(x).count("1"), map(int, netmask.split("."))))
+    mask = 32 - maskLength(netmask)
     ip1 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, network1.split(".")))))))
     ip2 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, network2.split(".")))))))
     ip1 = ip1 // (10 ** mask)
@@ -26,20 +29,31 @@ def isNumAdj(network1, network2, netmask):
     return (ip1 != ip2) and (ip1 // 10 == ip2 // 10)
 
 def decrementMask(netmask):
-    mask = sum(map(lambda x: bin(x).count("1"), map(int, netmask.split(".")))) - 1
+    mask = maskLength(netmask) - 1
     final = ""
     while mask > 8:
         mask -= 8
         final += "255."
-    mask = 256 - (2 ** mask)
+    mask = 256 - (2 ** (8 - mask))
     final += "%d" % (mask)
     while len(final.split(".")) < 4:
         final += ".0"
     return final
 
+def lesserIP(ip1, ip2):
+    bits1 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, ip1.split(".")))))))
+    bits2 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, ip2.split(".")))))))
+    if (bits1 > bits2):
+        return ip2
+    return ip1
+
 def pathSorter(p):
-    a = p["localpref"] * 10
-    a += 1 if p["selfOrigin"] else 0
+    a = 0
+    a *= 100
+    a += maskLength(p["netmask"])
+    a *= 1000
+    a += 999 - (p["localpref"] if p["localpref"] < 1000 else 999)
+    a += (1 if p["selfOrigin"] else 0)
     a *= 100
     a += 99 - (len(p["ASPath"]) if len(p["ASPath"]) < 100 else 99)
     a *= 10
@@ -88,14 +102,16 @@ class Router:
 
     def reaggregate(self):
         agg = False
-        for i in range(0, len(self.routing)):
-            r1 = self.routing[i]
-            for j in range(i + 1, len(self.routing)):
-                r2 = self.routing[j]
-                if r1["peer"] == r2["peer"] and r1["localpref"] == r2["localpref"] and r1["selfOrigin"] == r2["selfOrigin"] and r1["ASPath"] == r2["ASPath"] and r1["origin"] == r2["origin"] and r1["netmask"] == r2["netmask"] and isNumAdj(r1["network"], r2["network"], r1["netmask"]):
-                    self.routing.remove(r1)
-                    self.routing.remove(r2)
-                    self.routing.append(self.routing.append({"peer": r1["peer"], "network": r1["network"], "netmask": decrementMask(r1["netmask"]), "localpref": r1["localpref"], "selfOrigin": r1["selfOrigin"], "ASPath": r1["ASPath"], "origin": r1["origin"], "subroutes": [r1, r2]}))
+        for i in range(1, len(self.routing)):
+            for j in range(0, i):
+                if self.routing[i]["peer"] == self.routing[j]["peer"] and self.routing[i]["localpref"] == self.routing[j]["localpref"] and self.routing[i]["selfOrigin"] == self.routing[j]["selfOrigin"] and self.routing[i]["ASPath"] == self.routing[j]["ASPath"] and self.routing[i]["origin"] == self.routing[j]["origin"] and isNumAdj(self.routing[i]["network"], self.routing[j]["network"], self.routing[i]["netmask"]):
+                    r1 = self.routing.pop(i)
+                    r2 = self.routing.pop(j)
+                    print(r1)
+                    print(r2)
+                    self.routing.append(self.routing.append({"peer": r1["peer"], "network": lesserIP(r1["network"], r2["network"]), "netmask": decrementMask(r1["netmask"]) if r1["netmask"] == r2["netmask"] else lesserIP(r1["network"], r2["network"]), "localpref": r1["localpref"], "selfOrigin": r1["selfOrigin"], "ASPath": r1["ASPath"], "origin": r1["origin"], "subroutes": [r1, r2]}))
+                    self.routing = [x for x in self.routing if x != None]
+                    print(self.routing[-1])
                     agg = True
                     break
             if agg:
@@ -111,7 +127,7 @@ class Router:
                 if route["peer"] == srcif and route["network"] == netCompare["network"] and route["netmask"] == netCompare["netmask"]:
                     removeUs.append(route)
                 elif len(route["subroutes"]) > 0:
-                    foo, bar = checkSubroutes(msg, srcif, route)
+                    foo, bar = self.checkSubroutes(msg, srcif, route)
                     removeUs.extend(foo)
                     newRoutes.extend(bar)
         self.routing = [x for x in self.routing if x not in removeUs]
@@ -122,14 +138,15 @@ class Router:
         removeUs = []
         newRoutes = []
         for subroute in route["subroutes"]:
-            if subroute["peer"] == srcif and subroute["network"] == netCompare["network"] and subroute["netmask"] == netCompare["netmask"]:
-                removeUs.append(subroute)
-                newRoutes.extend([r for r in route["subroutes"] if r != subroute])
-                break
-            elif len(subroute["subroutes"]) > 0:
-                foo, bar = checkSubroutes(msg, srcif, subroute)
-                removeUs.extend(foo)
-                newRoutes.extend(bar)
+            for netCompare in msg["msg"]:
+                if subroute["peer"] == srcif and subroute["network"] == netCompare["network"] and subroute["netmask"] == netCompare["netmask"]:
+                    removeUs.append(subroute)
+                    newRoutes.extend([r for r in route["subroutes"] if r != subroute])
+                    break
+                elif len(subroute["subroutes"]) > 0:
+                    foo, bar = self.checkSubroutes(msg, srcif, subroute)
+                    removeUs.extend(foo)
+                    newRoutes.extend(bar)
         return removeUs, newRoutes
 
     def run(self):

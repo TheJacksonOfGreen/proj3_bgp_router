@@ -52,7 +52,7 @@ def pathSorter(p):
     a *= 100
     a += maskLength(p["netmask"])
     a *= 1000
-    a += 999 - (p["localpref"] if p["localpref"] < 1000 else 999)
+    a += ((p["localpref"] if p["localpref"] < 1000 else 999) if p["localpref"] > 0 else 0)
     a += (1 if p["selfOrigin"] else 0)
     a *= 100
     a += 99 - (len(p["ASPath"]) if len(p["ASPath"]) < 100 else 99)

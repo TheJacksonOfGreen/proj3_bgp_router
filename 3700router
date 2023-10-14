@@ -119,34 +119,22 @@ class Router:
         if agg:
             self.reaggregate()
 
-    def newRemove(self, msg, srcif):
+    def newRemove(self, rmroutes, srcif, sroute=None):
         removeUs = []
         newRoutes = []
-        for route in self.routing:
-            for netCompare in msg["msg"]:
+        for netCompare in rmroutes:
+            for route in self.routing if (sroute == None) else sroute["subroutes"]:
                 if route["peer"] == srcif and route["network"] == netCompare["network"] and route["netmask"] == netCompare["netmask"]:
                     removeUs.append(route)
-                elif len(route["subroutes"]) > 0:
-                    foo, bar = self.checkSubroutes(msg, srcif, route)
-                    removeUs.extend(foo)
-                    newRoutes.extend(bar)
-        self.routing = [x for x in self.routing if x not in removeUs]
-        for nr in newRoutes:
-            self.routing.append(nr)
-
-    def checkSubroutes(self, msg, srcif, route):
-        removeUs = []
-        newRoutes = []
-        for subroute in route["subroutes"]:
-            for netCompare in msg["msg"]:
-                if subroute["peer"] == srcif and subroute["network"] == netCompare["network"] and subroute["netmask"] == netCompare["netmask"]:
-                    removeUs.append(subroute)
-                    newRoutes.extend([r for r in route["subroutes"] if r != subroute])
                     break
-                elif len(subroute["subroutes"]) > 0:
-                    foo, bar = self.checkSubroutes(msg, srcif, subroute)
+                elif len(route["subroutes"]) > 0:
+                    foo, bar = self.newRemove([r for r in rmroutes if r not in removeUs], srcif, route)
                     removeUs.extend(foo)
                     newRoutes.extend(bar)
+        if (sroute == None):
+            self.routing = [x for x in self.routing if x not in removeUs]
+            for nr in newRoutes:
+                self.routing.append(nr)
         return removeUs, newRoutes
 
     def run(self):
@@ -161,7 +149,7 @@ class Router:
                         break
                 msg = json.loads(k.decode('utf-8'))
                 self.inbox.append(msg)
-                print("------- NEW MESSAGE RECVD -------")
+                print("\n------- NEW MESSAGE RECVD -------")
                 print("Received message '%s' from %s" % (msg, srcif))
                 if msg["type"] == "update":
                     self.routing.append({"peer": msg["src"], "network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "localpref": msg["msg"]["localpref"], "selfOrigin": msg["msg"]["selfOrigin"], "ASPath": msg["msg"]["ASPath"], "origin": msg["msg"]["origin"], "subroutes": []})
@@ -172,7 +160,7 @@ class Router:
                         if (self.relations[srcif] == "cust" or self.relations[neighbor] == "cust") and neighbor != srcif:
                             self.send(neighbor, json.dumps({ "type": "update", "src": self.our_addr(neighbor), "dst": neighbor, "msg": { "network": msg["msg"]["network"], "netmask": msg["msg"]["netmask"], "ASPath": newASPath } }))
                 elif msg["type"] == "withdraw":
-                    self.newRemove(msg, srcif)
+                    self.newRemove(msg["msg"], srcif)
                     for neighbor in self.neighbors:
                         if (self.relations[srcif] == "cust" or self.relations[neighbor] == "cust") and neighbor != srcif:
                             self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(neighbor), "dst": neighbor, "msg": msg["msg"] }))

@@ -9,25 +9,41 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 
+# maskLength: str -> int
+# Expects a netmask expressed as a string in the b10.b10.b10.b10 format. 
+# Returns the number of bits to be masked.
 def maskLength(str):
     return sum(map(lambda x: bin(x).count("1"), map(int, str.split("."))))
 
+# binarify: str -> int
+# Expects an IP Address expressed as a string in the b10.b10.b10.b10 format. 
+# Returns the binary expression of the IP Address as an Integer. 
+# Since the result of this function is expressed as a Base 10 Integer for simplicity's sake, bit shifts are performed throughout this 
+#   program by multiplying and dividing by powers of 10. 
+def binarify(ip):
+    return int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, ip.split(".")))))))
+
+# ipInRange: str, str, str -> bool
+# Expects two IP Addresses followed by a netmask, both expressed as a string in the b10.b10.b10.b10 format. 
+# Returns True if the first given IP Address is within the range expressed by the second IP Address and the netmask. 
 def ipInRange(ip, network, netmask):
     mask = 32 - maskLength(netmask)
-    rangeip = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, network.split(".")))))))
-    targetip = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, ip.split(".")))))))
-    rangeip = rangeip // (10 ** mask)
-    targetip = targetip // (10 ** mask)
+    rangeip = binarify(network) // (10 ** mask)
+    targetip = binarify(ip) // (10 ** mask)
     return rangeip == targetip
 
+# isNumAdj: str, str, str -> bool
+# Expects two IP Addresses followed by a netmask, both expressed as a string in the b10.b10.b10.b10 format. 
+# Returns True if, when using the given netmask to truncate bits, the two IP Addresses differ in the ones place, and only the ones place. 
 def isNumAdj(network1, network2, netmask):
     mask = 32 - maskLength(netmask)
-    ip1 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, network1.split(".")))))))
-    ip2 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, network2.split(".")))))))
-    ip1 = ip1 // (10 ** mask)
-    ip2 = ip2 // (10 ** mask)
+    ip1 = binarify(network1) // (10 ** mask)
+    ip2 = binarify(network2) // (10 ** mask)
     return (ip1 != ip2) and (ip1 // 10 == ip2 // 10)
 
+# decrementMask: str -> str
+# Expects a netmask expressed as a string in the b10.b10.b10.b10 format. 
+# Returns a netmask that is exactly one bit smaller, also expressed in the b10.b10.b10.b10 format. 
 def decrementMask(netmask):
     mask = maskLength(netmask) - 1
     final = ""
@@ -40,13 +56,18 @@ def decrementMask(netmask):
         final += ".0"
     return final
 
+# lesserIP: str, str -> str
+# Expects two IP Addresses, both expressed as a string in the b10.b10.b10.b10 format. 
+# Returns the lesser of the two IP Addresses. 
 def lesserIP(ip1, ip2):
-    bits1 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, ip1.split(".")))))))
-    bits2 = int("".join(map(lambda x: x.split("b")[1].rjust(8, "0"), map(str, map(bin, map(int, ip2.split(".")))))))
-    if (bits1 > bits2):
+    if (binarify(ip1) > binarify(ip2)):
         return ip2
     return ip1
 
+# pathSorter: dict -> int
+# Expects a dictionary containing fields that identify it as an expression of a valid path for messages. 
+# Returns an integer determining the priority of this route, for the purpose of comparing against other routes.
+# The larger the number returned, the "better" the route is, according to the specifications within test case groups 2 and 5. 
 def pathSorter(p):
     a = 0
     a *= 100
@@ -69,6 +90,8 @@ def pathSorter(p):
     a += 256 - ipSplit[3]
     return a
 
+# Router
+# Primary Class. Stores data and functionality of a Simple BGP Router.
 class Router:
     debug = True
     relations = {}
@@ -78,6 +101,9 @@ class Router:
     neighbors = []
     inbox = []
 
+    # __init__: int, list -> Router
+    # Expects an ASN Number, and a list of other Routers in the network.
+    # Initializes Router according to given parameters.
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
@@ -91,15 +117,23 @@ class Router:
             self.neighbors.append(neighbor)
             self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {} }))
 
+    # our_addr: str -> str
+    # Expects a valid destination.
+    # Returns this Router's address, according to the destination.
     def our_addr(self, dst):
         quads = list(int(qdn) for qdn in dst.split('.'))
         quads[3] = 1
         return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
 
+    # send: str, str
+    # Expects the IP Address of a peer, expressed in b10.b10.b10.b10 format, and a message to be sent.
+    # Sends a message to another router in the network. 
     def send(self, network, message):
         print("Sending message '%s' to %s" % (message, network))
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
+    # reaggregate
+    # Reaggregates Routing Table. 
     def reaggregate(self):
         agg = False
         for i in range(1, len(self.routing)):
@@ -119,6 +153,10 @@ class Router:
         if agg:
             self.reaggregate()
 
+    # newRemove: list, str, OPTIONAL dict -> list, list
+    # Expects a list of routes to try and remove, the peer that is requesting the routes be removed, and (optionally), a route whose  
+    #   subroutes will be checked instead of the main routing table. 
+    # Removes the given routes from the routing table. Recursively checks aggregated subroutes and disaggregates (in theory). 
     def newRemove(self, rmroutes, srcif, sroute=None):
         removeUs = []
         newRoutes = []
@@ -137,6 +175,8 @@ class Router:
                 self.routing.append(nr)
         return removeUs, newRoutes
 
+    # run
+    # Runs the Router. 
     def run(self):
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
